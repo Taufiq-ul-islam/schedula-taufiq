@@ -1,0 +1,54 @@
+erDiagram
+    USER ||--o{ PATIENT : "manages family members"
+    USER ||--o| DOCTOR : "is"
+    DOCTOR ||--o{ SLOT : has
+    DOCTOR ||--o{ APPOINTMENT : "consults for"
+    PATIENT ||--o{ APPOINTMENT : books
+    SLOT ||--o{ APPOINTMENT : "is booked as"
+
+    USER {
+        int id PK
+        string mobile_number
+        string role
+        datetime created_at
+    }
+
+    PATIENT {
+        int id PK
+        int user_id FK
+        string name
+        int age
+        string sex
+        float weight
+        string relation
+        string complaint
+    }
+
+    DOCTOR {
+        int id PK
+        int user_id FK
+        string name
+        string specialization
+        int experience_years
+        string qualification
+    }
+
+    SLOT {
+        int id PK
+        int doctor_id FK
+        date slot_date
+        time start_time
+        time end_time
+        boolean is_available
+    }
+
+    APPOINTMENT {
+        int id PK
+        int doctor_id FK
+        int patient_id FK
+        int slot_id FK
+        string status
+        string reason
+        string notes
+        datetime created_at
+    }
