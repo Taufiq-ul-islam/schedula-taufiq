@@ -3,8 +3,8 @@ import { Patient } from '../patient/patient.entity';
 import { Doctor } from '../doctor/doctor.entity';
 
 export enum UserRole {
-  PATIENT = 'patient',
-  DOCTOR = 'doctor',
+  PATIENT = 'PATIENT',
+  DOCTOR = 'DOCTOR',
 }
 
 @Entity()
@@ -14,6 +14,9 @@ export class User {
 
   @Column({ unique: true })
   mobileNumber!: string;
+
+  @Column()
+  password!: string; // stored as bcrypt hash
 
   @Column({ type: 'enum', enum: UserRole, default: UserRole.PATIENT })
   role!: UserRole;
