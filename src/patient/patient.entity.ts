@@ -14,16 +14,19 @@ export class Patient {
   age!: number;
 
   @Column()
-  sex!: string;
-
-  @Column({ type: 'float' })
-  weight!: number;
-
-  @Column()
-  relation!: string;
+  gender!: string;
 
   @Column({ nullable: true })
-  complaint!: string;
+  phone!: string;
+
+  @Column({ nullable: true })
+  address!: string;
+
+  @Column({ type: 'text', nullable: true })
+  medicalHistory!: string; // optional basic health info
+
+  @Column({ default: 'Self' })
+  relation!: string;
 
   @ManyToOne(() => User, (user) => user.patients)
   user!: User;

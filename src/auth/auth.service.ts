@@ -22,6 +22,7 @@ export class AuthService {
 
     const hashedPassword = await bcrypt.hash(dto.password, 10);
     const user = this.userRepo.create({
+      name: dto.name,
       mobileNumber: dto.mobileNumber,
       password: hashedPassword,
       role: dto.role,
@@ -49,7 +50,7 @@ export class AuthService {
     const payload = { sub: user.id, role: user.role, mobileNumber: user.mobileNumber };
     return {
       accessToken: this.jwtService.sign(payload),
-      user: { id: user.id, mobileNumber: user.mobileNumber, role: user.role },
+      user: { id: user.id, name: user.name, mobileNumber: user.mobileNumber, role: user.role },
     };
   }
 }
