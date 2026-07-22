@@ -8,20 +8,11 @@ erDiagram
 
     USER {
         int id PK
+        string name
         string mobile_number
+        string password
         string role
         datetime created_at
-    }
-
-    PATIENT {
-        int id PK
-        int user_id FK
-        string name
-        int age
-        string sex
-        float weight
-        string relation
-        string complaint
     }
 
     DOCTOR {
@@ -31,6 +22,21 @@ erDiagram
         string specialization
         int experience_years
         string qualification
+        decimal consultation_fee
+        string consultation_hours
+        text bio
+    }
+
+    PATIENT {
+        int id PK
+        int user_id FK
+        string name
+        int age
+        string gender
+        string phone
+        string address
+        text medical_history
+        string relation
     }
 
     SLOT {
