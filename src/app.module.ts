@@ -18,7 +18,9 @@ import { AuthModule } from './auth/auth.module';
       type: 'postgres',
       url: process.env.DATABASE_URL,
       autoLoadEntities: true,
-      synchronize: true, // dev only — never true in production
+      synchronize: false, // migrations only from now on
+      entities: [__dirname + '/**/*.entity{.ts,.js}'],
+      migrations: [__dirname + '/migrations/*{.ts,.js}'],
     }),
     UserModule,
     DoctorModule,

@@ -4,6 +4,10 @@ import { UserRole } from '../../user/user.entity';
 export class SignupDto {
   @IsString()
   @IsNotEmpty()
+  name!: string;
+  
+  @IsString()
+  @IsNotEmpty()
   mobileNumber!: string;
 
   @IsString()
