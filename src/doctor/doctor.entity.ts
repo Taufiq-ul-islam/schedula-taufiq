@@ -2,6 +2,8 @@ import { Entity, PrimaryGeneratedColumn, Column, OneToMany, OneToOne, JoinColumn
 import { Appointment } from '../appointment/appointment.entity';
 import { Slot } from './slot.entity';
 import { User } from '../user/user.entity';
+import { RecurringAvailability } from './entities/recurring-availability.entity';
+import { CustomAvailability } from './entities/custom-availability.entity';
 
 @Entity()
 export class Doctor {
@@ -24,7 +26,7 @@ export class Doctor {
   consultationFee!: number;
 
   @Column({ nullable: true })
-  consultationHours!: string; // e.g. "Mon-Fri 10AM-1PM, Sat 2PM-5PM"
+  consultationHours!: string;
 
   @Column({ type: 'text', nullable: true })
   bio!: string;
@@ -34,6 +36,12 @@ export class Doctor {
 
   @OneToMany(() => Slot, (slot) => slot.doctor)
   slots!: Slot[];
+
+  @OneToMany(() => RecurringAvailability, (r) => r.doctor)
+  recurringAvailability!: RecurringAvailability[];
+
+  @OneToMany(() => CustomAvailability, (c) => c.doctor)
+  customAvailability!: CustomAvailability[];
 
   @OneToOne(() => User, (user) => user.doctorProfile)
   @JoinColumn()
