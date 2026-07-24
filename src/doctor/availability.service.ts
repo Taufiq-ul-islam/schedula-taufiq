@@ -165,4 +165,22 @@ export class AvailabilityService {
 
     return { date: dateStr, source: 'recurring', dayOfWeek, slots: recurring };
   }
+
+  async getAvailabilityForDateByDoctorId(doctorId: number, dateStr: string) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      throw new BadRequestException('date must be in YYYY-MM-DD format');
+    }
+    const overrides = await this.customRepo.find({ where: { doctor: { id: doctorId }, date: dateStr } });
+    if (overrides.length > 0) {
+      return { date: dateStr, source: 'override', slots: overrides };
+    }
+    const parsedDate = new Date(dateStr);
+    if (isNaN(parsedDate.getTime())) throw new BadRequestException('Invalid date provided');
+    const dayOfWeek = DAY_INDEX[parsedDate.getUTCDay()];
+    const recurring = await this.recurringRepo.find({ where: { doctor: { id: doctorId }, dayOfWeek } });
+    if (recurring.length === 0) {
+      throw new NotFoundException(`Doctor is not available on ${dayOfWeek} (${dateStr})`);
+    }
+    return { date: dateStr, source: 'recurring', dayOfWeek, slots: recurring };
+  }
 }

@@ -1,0 +1,29 @@
+```mermaid
+flowchart TD
+    subgraph STREAM["Stream Scheduling Flow"]
+        direction TB
+        A1[Doctor sets scheduling type: STREAM] --> A2[Doctor defines slot duration and buffer time]
+        A2 --> A3[Doctor sets weekly recurring availability]
+        A3 --> A4[System generates fixed time slots per window]
+        A4 --> A5[Patient fetches doctor slots for a date]
+        A5 --> A6[Patient sees exact time slots: e.g. 10:00-10:15]
+        A6 --> A7{Slot available and not in past?}
+        A7 -->|No| A8[Reject: slot booked or past]
+        A7 -->|Yes| A9[Patient books exact slot]
+        A9 --> A10[Appointment created with exact startTime/endTime]
+    end
+
+    subgraph WAVE["Wave Scheduling Flow"]
+        direction TB
+        B1[Doctor sets scheduling type: WAVE] --> B2[Doctor defines time window and max capacity]
+        B2 --> B3[Doctor sets weekly recurring availability]
+        B3 --> B4[System exposes window as a group: e.g. 10AM-11AM]
+        B4 --> B5[Patient fetches doctor windows for a date]
+        B5 --> B6[Patient sees window with Available: booked/max]
+        B6 --> B7{Window full?}
+        B7 -->|Yes| B8[Reject: wave is full]
+        B7 -->|No| B9[Patient books window]
+        B9 --> B10[Token number assigned = current booked count + 1]
+        B10 --> B11[Appointment created with window time + token number]
+    end
+```
