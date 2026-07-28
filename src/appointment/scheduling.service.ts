@@ -8,6 +8,8 @@ import { Appointment } from './appointment.entity';
 import { AvailabilityService } from '../doctor/availability.service';
 import { BookStreamAppointmentDto } from './dto/book-stream-appointment.dto';
 import { BookWaveAppointmentDto } from './dto/book-wave-appointment.dto';
+import { BookAppointmentDto } from './dto/book-appointment.dto';
+import { AppointmentStatus } from './enums/appointment-status.enum';
 
 function toMinutes(time: string): number {
   const [h, m] = time.split(':').map(Number);
@@ -31,6 +33,20 @@ export class SchedulingService {
   private isPast(date: string, time: string): boolean {
     const candidate = new Date(`${date}T${time}:00`);
     return candidate.getTime() < Date.now();
+  }
+  async bookAppointment(userId: number, dto: BookAppointmentDto) {
+    const doctor = await this.doctorRepo.findOne({ where: { id: dto.doctorId } });
+    if (!doctor) throw new NotFoundException('Doctor not found');
+    if (!doctor.schedulingType) throw new BadRequestException('Doctor has not configured scheduling yet');
+
+    if (doctor.schedulingType === SchedulingType.STREAM) {
+      return this.bookStream(userId, dto.doctorId, { date: dto.date, startTime: dto.startTime });
+    }
+    return this.bookWave(userId, dto.doctorId, {
+      date: dto.date,
+      windowStartTime: dto.startTime,
+      windowEndTime: dto.endTime,
+    });
   }
 
   async getAvailableSlots(doctorId: number, date: string) {
@@ -76,13 +92,20 @@ export class SchedulingService {
     return { date, schedulingType: SchedulingType.STREAM, slots };
   }
 
+  private async findWaveBookings(doctorId: number, date: string) {
+    return this.appointmentRepo
+      .createQueryBuilder('a')
+      .where('a.doctorId = :doctorId', { doctorId })
+      .andWhere('a.apptDate = :date', { date })
+      .andWhere('a.schedulingType = :type', { type: SchedulingType.WAVE })
+      .getMany();
+  }
+
   private async generateWaveWindows(doctor: Doctor, date: string, windows: { startTime: string; endTime: string }[]) {
     const maxCapacity = doctor.maxCapacityPerWindow;
     if (!maxCapacity || maxCapacity <= 0) throw new BadRequestException('Invalid capacity configured');
 
-    const existingBookings = await this.appointmentRepo.find({
-      where: { doctor: { id: doctor.id }, apptDate: date, schedulingType: SchedulingType.WAVE },
-    });
+    const existingBookings = await this.findWaveBookings(doctor.id, date);
 
     const result = windows.map((w) => {
       const bookedCount = existingBookings.filter(
@@ -133,7 +156,7 @@ export class SchedulingService {
       startTime: dto.startTime,
       endTime,
       schedulingType: SchedulingType.STREAM,
-      status: 'upcoming',
+      status: AppointmentStatus.BOOKED,   // ← changed from 'upcoming'
     });
     return this.appointmentRepo.save(appointment);
   }
@@ -185,7 +208,7 @@ export class SchedulingService {
       endTime: dto.windowEndTime,
       schedulingType: SchedulingType.WAVE,
       tokenNumber,
-      status: 'upcoming',
+      status: AppointmentStatus.BOOKED,   // ← changed from 'upcoming'
     });
     return this.appointmentRepo.save(appointment);
   }

@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { forwardRef, Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { DoctorService } from './doctor.service';
 import { DoctorController } from './doctor.controller';
@@ -9,9 +9,13 @@ import { RecurringAvailability } from './entities/recurring-availability.entity'
 import { CustomAvailability } from './entities/custom-availability.entity';
 import { SchedulingConfigService } from './scheduling-config.service';
 import { SchedulingConfigController } from './scheduling-config.controller';
+import { AppointmentModule } from 'src/appointment/appointment.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Doctor, RecurringAvailability, CustomAvailability])],
+  imports: [
+    TypeOrmModule.forFeature([Doctor, RecurringAvailability, CustomAvailability]), 
+    forwardRef(() => AppointmentModule),
+  ],
   providers: [DoctorService, AvailabilityService, SchedulingConfigService],
   controllers: [DoctorController, AvailabilityController, SchedulingConfigController],
   exports: [TypeOrmModule, AvailabilityService],

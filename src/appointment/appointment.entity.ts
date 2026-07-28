@@ -2,6 +2,7 @@ import { Entity, PrimaryGeneratedColumn, Column, ManyToOne } from 'typeorm';
 import { Doctor } from '../doctor/doctor.entity';
 import { Patient } from '../patient/patient.entity';
 import { SchedulingType } from '../doctor/enums/scheduling-type.enum';
+import { AppointmentStatus } from './enums/appointment-status.enum';
 
 @Entity()
 export class Appointment {
@@ -23,8 +24,8 @@ export class Appointment {
   @Column({ nullable: true })
   tokenNumber!: number; // WAVE only
 
-  @Column({ default: 'upcoming' })
-  status!: string;
+  @Column({ type: 'enum', enum: AppointmentStatus, default: AppointmentStatus.BOOKED })
+  status!: AppointmentStatus;
 
   @Column({ nullable: true })
   reason!: string;
