@@ -4,10 +4,10 @@
 erDiagram
     USER ||--o{ PATIENT : "manages family members"
     USER ||--o| DOCTOR : "is"
-    DOCTOR ||--o{ SLOT : has
     DOCTOR ||--o{ APPOINTMENT : "consults for"
+    DOCTOR ||--o{ RECURRING_AVAILABILITY : has
+    DOCTOR ||--o{ CUSTOM_AVAILABILITY : has
     PATIENT ||--o{ APPOINTMENT : books
-    SLOT ||--o{ APPOINTMENT : "is booked as"
 
     USER {
         int id PK
@@ -28,6 +28,10 @@ erDiagram
         decimal consultation_fee
         string consultation_hours
         text bio
+        string scheduling_type
+        int slot_duration_minutes
+        int buffer_minutes
+        int max_capacity_per_window
     }
 
     PATIENT {
@@ -42,20 +46,31 @@ erDiagram
         string relation
     }
 
-    SLOT {
+    RECURRING_AVAILABILITY {
         int id PK
         int doctor_id FK
-        date slot_date
+        string day_of_week
         time start_time
         time end_time
-        boolean is_available
+    }
+
+    CUSTOM_AVAILABILITY {
+        int id PK
+        int doctor_id FK
+        date date
+        time start_time
+        time end_time
     }
 
     APPOINTMENT {
         int id PK
         int doctor_id FK
         int patient_id FK
-        int slot_id FK
+        date appt_date
+        time start_time
+        time end_time
+        string scheduling_type
+        int token_number
         string status
         string reason
         string notes
