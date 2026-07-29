@@ -1,0 +1,16 @@
+```mermaid
+flowchart TD
+    A[Patient selects doctor] --> B[Patient selects date]
+    B --> C[Fetch available slots/windows for that date]
+    C --> D{Slot or window available?}
+    D -->|No| E[Show: slot unavailable]
+    D -->|Yes| F[Patient submits booking: doctorId, date, startTime, endTime]
+    F --> G{Doctor exists?}
+    G -->|No| H[404: Doctor not found]
+    G -->|Yes| I{Date/time is in the future?}
+    I -->|No| J[400: Cannot book past appointment]
+    I -->|Yes| K{Already booked by this patient / slot full?}
+    K -->|Yes| L[409: Slot already booked / Wave full]
+    K -->|No| M[Appointment created, status = BOOKED]
+    M --> N[Slot marked unavailable / token assigned for future fetches]
+```
