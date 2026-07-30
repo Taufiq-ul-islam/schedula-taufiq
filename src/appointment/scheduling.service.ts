@@ -93,6 +93,15 @@ export class SchedulingService {
     return { date, schedulingType: SchedulingType.STREAM, slots };
   }
 
+  private async findWaveBookings(doctorId: number, date: string) {
+    return this.appointmentRepo
+      .createQueryBuilder('a')
+      .where('a.doctorId = :doctorId', { doctorId })
+      .andWhere('a.apptDate = :date', { date })
+      .andWhere('a.schedulingType = :type', { type: SchedulingType.WAVE })
+      .getMany();
+  }
+
   private async findWaveBookingsForWindow(
     doctorId: number,
     date: string,
@@ -113,6 +122,94 @@ export class SchedulingService {
       qb.andWhere('a.id != :excludeId', { excludeId: excludeAppointmentId });
     }
     return qb.getMany();
+  }
+
+  async rescheduleAppointment(userId: number, appointmentId: number, dto: RescheduleAppointmentDto) {
+    const appointment = await this.appointmentRepo.findOne({
+      where: { id: appointmentId },
+      relations: { patient: true, doctor: true },
+    });
+    if (!appointment) throw new NotFoundException('Appointment not found');
+
+    const patient = await this.patientRepo.findOne({ where: { user: { id: userId }, relation: 'Self' } });
+    if (!patient) throw new NotFoundException('Patient profile not found');
+
+    if (appointment.patient.id !== patient.id) {
+      throw new ForbiddenException('You are not the owner of this appointment');
+    }
+    if (appointment.status === AppointmentStatus.CANCELLED) {
+      throw new BadRequestException('Cannot reschedule a cancelled appointment');
+    }
+
+    const oldDateTime = new Date(`${appointment.apptDate}T${appointment.startTime}:00`);
+    if (oldDateTime.getTime() < Date.now()) {
+      throw new BadRequestException('Cannot reschedule a past appointment');
+    }
+    if (this.isPast(dto.date, dto.startTime)) {
+      throw new BadRequestException('Cannot reschedule to a past date/time');
+    }
+
+    const doctor = await this.doctorRepo.findOne({ where: { id: appointment.doctor.id } });
+    if (!doctor) throw new NotFoundException('Doctor not found');
+
+    const availability = await this.availabilityService.getAvailabilityForDateByDoctorId(doctor.id, dto.date);
+    const windows = availability.slots as { startTime: string; endTime: string }[];
+
+    if (doctor.schedulingType === SchedulingType.STREAM) {
+      const duration = doctor.slotDurationMinutes;
+      if (!duration) throw new BadRequestException('Invalid slot duration configured');
+      const newEndTime = toTimeStr(toMinutes(dto.startTime) + duration);
+
+      const withinWindow = windows.some((w) => dto.startTime >= w.startTime && newEndTime <= w.endTime);
+      if (!withinWindow) throw new BadRequestException('Selected time is outside doctor availability');
+
+      const conflict = await this.appointmentRepo
+        .createQueryBuilder('a')
+        .where('a.doctorId = :doctorId', { doctorId: doctor.id })
+        .andWhere('a.apptDate = :date', { date: dto.date })
+        .andWhere('a.startTime = :startTime', { startTime: dto.startTime })
+        .andWhere('a.id != :id', { id: appointment.id })
+        .andWhere('a.status = :status', { status: AppointmentStatus.BOOKED })
+        .getOne();
+      if (conflict) throw new ConflictException('This slot is already booked');
+
+      const duplicate = await this.appointmentRepo
+        .createQueryBuilder('a')
+        .where('a.patientId = :patientId', { patientId: patient.id })
+        .andWhere('a.apptDate = :date', { date: dto.date })
+        .andWhere('a.startTime = :startTime', { startTime: dto.startTime })
+        .andWhere('a.id != :id', { id: appointment.id })
+        .andWhere('a.status = :status', { status: AppointmentStatus.BOOKED })
+        .getOne();
+      if (duplicate) throw new ConflictException('You already have an appointment at this time');
+
+      appointment.apptDate = dto.date;
+      appointment.startTime = dto.startTime;
+      appointment.endTime = newEndTime;
+    } else {
+      if (!dto.endTime) throw new BadRequestException('endTime is required to identify the wave window');
+      const maxCapacity = doctor.maxCapacityPerWindow;
+      if (!maxCapacity) throw new BadRequestException('Invalid capacity configured');
+
+      const validWindow = windows.some((w) => w.startTime === dto.startTime && w.endTime === dto.endTime);
+      if (!validWindow) throw new BadRequestException('Selected window is not a valid availability window');
+
+      const existingInWindow = await this.findWaveBookingsForWindow(
+        doctor.id, dto.date, dto.startTime, dto.endTime, appointment.id,
+      );
+      if (existingInWindow.length >= maxCapacity) {
+        throw new ConflictException('This wave is full');
+      }
+      const duplicate = existingInWindow.find((a) => a.patient.id === patient.id);
+      if (duplicate) throw new ConflictException('You already have an appointment in this window');
+
+      appointment.apptDate = dto.date;
+      appointment.startTime = dto.startTime;
+      appointment.endTime = dto.endTime;
+      appointment.tokenNumber = existingInWindow.length + 1;
+    }
+
+    return this.appointmentRepo.save(appointment);
   }
 
   private async generateWaveWindows(doctor: Doctor, date: string, windows: { startTime: string; endTime: string }[]) {
@@ -224,94 +321,6 @@ export class SchedulingService {
       tokenNumber,
       status: AppointmentStatus.BOOKED,   // ← changed from 'upcoming'
     });
-    return this.appointmentRepo.save(appointment);
-  }
-
-  async rescheduleAppointment(userId: number, appointmentId: number, dto: RescheduleAppointmentDto) {
-    const appointment = await this.appointmentRepo.findOne({
-      where: { id: appointmentId },
-      relations: { patient: true, doctor: true },
-    });
-    if (!appointment) throw new NotFoundException('Appointment not found');
-
-    const patient = await this.patientRepo.findOne({ where: { user: { id: userId }, relation: 'Self' } });
-    if (!patient) throw new NotFoundException('Patient profile not found');
-
-    if (appointment.patient.id !== patient.id) {
-      throw new ForbiddenException('You are not the owner of this appointment');
-    }
-    if (appointment.status === AppointmentStatus.CANCELLED) {
-      throw new BadRequestException('Cannot reschedule a cancelled appointment');
-    }
-
-    const oldDateTime = new Date(`${appointment.apptDate}T${appointment.startTime}:00`);
-    if (oldDateTime.getTime() < Date.now()) {
-      throw new BadRequestException('Cannot reschedule a past appointment');
-    }
-    if (this.isPast(dto.date, dto.startTime)) {
-      throw new BadRequestException('Cannot reschedule to a past date/time');
-    }
-
-    const doctor = await this.doctorRepo.findOne({ where: { id: appointment.doctor.id } });
-    if (!doctor) throw new NotFoundException('Doctor not found');
-
-    const availability = await this.availabilityService.getAvailabilityForDateByDoctorId(doctor.id, dto.date);
-    const windows = availability.slots as { startTime: string; endTime: string }[];
-
-    if (doctor.schedulingType === SchedulingType.STREAM) {
-      const duration = doctor.slotDurationMinutes;
-      if (!duration) throw new BadRequestException('Invalid slot duration configured');
-      const newEndTime = toTimeStr(toMinutes(dto.startTime) + duration);
-
-      const withinWindow = windows.some((w) => dto.startTime >= w.startTime && newEndTime <= w.endTime);
-      if (!withinWindow) throw new BadRequestException('Selected time is outside doctor availability');
-
-      const conflict = await this.appointmentRepo
-        .createQueryBuilder('a')
-        .where('a.doctorId = :doctorId', { doctorId: doctor.id })
-        .andWhere('a.apptDate = :date', { date: dto.date })
-        .andWhere('a.startTime = :startTime', { startTime: dto.startTime })
-        .andWhere('a.id != :id', { id: appointment.id })
-        .andWhere('a.status = :status', { status: AppointmentStatus.BOOKED })
-        .getOne();
-      if (conflict) throw new ConflictException('This slot is already booked');
-
-      const duplicate = await this.appointmentRepo
-        .createQueryBuilder('a')
-        .where('a.patientId = :patientId', { patientId: patient.id })
-        .andWhere('a.apptDate = :date', { date: dto.date })
-        .andWhere('a.startTime = :startTime', { startTime: dto.startTime })
-        .andWhere('a.id != :id', { id: appointment.id })
-        .andWhere('a.status = :status', { status: AppointmentStatus.BOOKED })
-        .getOne();
-      if (duplicate) throw new ConflictException('You already have an appointment at this time');
-
-      appointment.apptDate = dto.date;
-      appointment.startTime = dto.startTime;
-      appointment.endTime = newEndTime;
-    } else {
-      if (!dto.endTime) throw new BadRequestException('endTime is required to identify the wave window');
-      const maxCapacity = doctor.maxCapacityPerWindow;
-      if (!maxCapacity) throw new BadRequestException('Invalid capacity configured');
-
-      const validWindow = windows.some((w) => w.startTime === dto.startTime && w.endTime === dto.endTime);
-      if (!validWindow) throw new BadRequestException('Selected window is not a valid availability window');
-
-      const existingInWindow = await this.findWaveBookingsForWindow(
-        doctor.id, dto.date, dto.startTime, dto.endTime, appointment.id,
-      );
-      if (existingInWindow.length >= maxCapacity) {
-        throw new ConflictException('This wave is full');
-      }
-      const duplicate = existingInWindow.find((a) => a.patient.id === patient.id);
-      if (duplicate) throw new ConflictException('You already have an appointment in this window');
-
-      appointment.apptDate = dto.date;
-      appointment.startTime = dto.startTime;
-      appointment.endTime = dto.endTime;
-      appointment.tokenNumber = existingInWindow.length + 1;
-    }
-
     return this.appointmentRepo.save(appointment);
   }
 }
