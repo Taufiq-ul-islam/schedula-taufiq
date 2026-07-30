@@ -6,6 +6,8 @@ import { UserRole } from '../user/user.entity';
 import { AppointmentService } from './appointment.service';
 import { SchedulingService } from './scheduling.service';
 import { BookAppointmentDto } from './dto/book-appointment.dto';
+import { RescheduleAppointmentDto } from './dto/reschedule-appointment.dto';
+import { toAppointmentResponse } from './mappers/appointment-response.mapper';
 
 @Controller('appointment')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -31,5 +33,16 @@ export class AppointmentController {
   @Roles(UserRole.PATIENT)
   cancel(@Request() req: any, @Param('id', ParseIntPipe) id: number) {
     return this.appointmentService.cancelAppointment(req.user.userId, id);
+  }
+
+  @Patch(':id/reschedule')
+  @Roles(UserRole.PATIENT)
+  reschedule(
+    @Request() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: RescheduleAppointmentDto,
+  ) {
+    return this.schedulingService.rescheduleAppointment(req.user.userId, id, dto)
+      .then(toAppointmentResponse);
   }
 }
