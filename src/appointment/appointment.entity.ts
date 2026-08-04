@@ -36,6 +36,12 @@ export class Appointment {
   @Column({ type: 'timestamp', default: () => 'CURRENT_TIMESTAMP' })
   createdAt!: Date;
 
+  @Column({ nullable: true })
+  cancelReason!: string;
+
+  @Column({ default: false })
+  notificationPending!: boolean;
+
   @ManyToOne(() => Doctor, (doctor) => doctor.appointments)
   doctor!: Doctor;
 

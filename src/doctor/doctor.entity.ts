@@ -53,6 +53,9 @@ export class Doctor {
   @Column({ nullable: true })
   maxCapacityPerWindow!: number; // WAVE only
 
+  @Column({ nullable: true })
+  minMinutesPerPatient!: number; // WAVE only, optional
+
   @OneToOne(() => User, (user) => user.doctorProfile)
   @JoinColumn()
   user!: User;

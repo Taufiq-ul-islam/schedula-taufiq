@@ -21,6 +21,7 @@ import { AuthModule } from './auth/auth.module';
       synchronize: false, // migrations only from now on
       entities: [__dirname + '/**/*.entity{.ts,.js}'],
       migrations: [__dirname + '/migrations/*{.ts,.js}'],
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
     }),
     UserModule,
     DoctorModule,

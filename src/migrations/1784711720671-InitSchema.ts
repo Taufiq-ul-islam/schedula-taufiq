@@ -4,6 +4,7 @@ export class InitSchema1784711720671 implements MigrationInterface {
     name = 'InitSchema1784711720671'
 
     public async up(queryRunner: QueryRunner): Promise<void> {
+        await queryRunner.query(`CREATE TYPE "public"."user_role_enum" AS ENUM ('PATIENT', 'DOCTOR')`);
         await queryRunner.query(`CREATE TABLE "slot" ("id" SERIAL NOT NULL, "slotDate" date NOT NULL, "startTime" TIME NOT NULL, "endTime" TIME NOT NULL, "isAvailable" boolean NOT NULL DEFAULT true, "doctorId" integer, CONSTRAINT "PK_5b1f733c4ba831a51f3c114607b" PRIMARY KEY ("id"))`);
         await queryRunner.query(`CREATE TABLE "patient" ("id" SERIAL NOT NULL, "name" character varying NOT NULL, "age" integer NOT NULL, "gender" character varying NOT NULL, "phone" character varying, "address" character varying, "medicalHistory" text, "relation" character varying NOT NULL DEFAULT 'Self', "userId" integer, CONSTRAINT "PK_8dfa510bb29ad31ab2139fbfb99" PRIMARY KEY ("id"))`);
         await queryRunner.query(`CREATE TABLE "user" ("id" SERIAL NOT NULL, "name" character varying NOT NULL, "mobileNumber" character varying NOT NULL, "password" character varying NOT NULL, "role" "public"."user_role_enum" NOT NULL DEFAULT 'PATIENT', "createdAt" TIMESTAMP NOT NULL DEFAULT now(), CONSTRAINT "UQ_3a6f6a955e65852415ee7bbf1ec" UNIQUE ("mobileNumber"), CONSTRAINT "PK_cace4a159ff9f2512dd42373760" PRIMARY KEY ("id"))`);
@@ -27,6 +28,7 @@ export class InitSchema1784711720671 implements MigrationInterface {
         await queryRunner.query(`DROP TABLE "appointment"`);
         await queryRunner.query(`DROP TABLE "doctor"`);
         await queryRunner.query(`DROP TABLE "user"`);
+        await queryRunner.query(`DROP TYPE "public"."user_role_enum"`);
         await queryRunner.query(`DROP TABLE "patient"`);
         await queryRunner.query(`DROP TABLE "slot"`);
     }
