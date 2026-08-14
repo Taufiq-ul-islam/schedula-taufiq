@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { Doctor } from '../doctor/doctor.entity';
 import { SchedulingType } from '../doctor/enums/scheduling-type.enum';
 import { Patient } from '../patient/patient.entity';
@@ -8,6 +8,8 @@ import { Appointment } from './appointment.entity';
 import { AppointmentStatus } from './enums/appointment-status.enum';
 import { CancelReason } from './enums/cancel-reason.enum';
 import { AvailabilityService } from '../doctor/availability.service';
+import { NotificationService } from '../notification/notification.service';
+import { ensureNotWithinCutoff } from './appointment-time.util';
 import { BookStreamAppointmentDto } from './dto/book-stream-appointment.dto';
 import { BookWaveAppointmentDto } from './dto/book-wave-appointment.dto';
 import { BookAppointmentDto } from './dto/book-appointment.dto';
@@ -23,7 +25,14 @@ function toTimeStr(mins: number): string {
   return `${h}:${m}`;
 }
 
-const RESCHEDULE_CANCEL_CUTOFF_MINUTES = 30;
+const AUTO_RESCHEDULE_LOOKAHEAD_DAYS = 7; // matches the existing next-available-suggestion horizon
+const AUTO_RESCHEDULE_MAX_CANDIDATES = 10; // cap how many candidate slots we try to claim before giving up
+
+interface CandidateSlot {
+  date: string;
+  startTime: string;
+  endTime: string;
+}
 
 @Injectable()
 export class SchedulingService {
@@ -32,6 +41,7 @@ export class SchedulingService {
     @InjectRepository(Patient) private patientRepo: Repository<Patient>,
     @InjectRepository(Appointment) private appointmentRepo: Repository<Appointment>,
     private availabilityService: AvailabilityService,
+    private notificationService: NotificationService,
   ) {}
 
   // ---------- shared helpers ----------
@@ -39,19 +49,6 @@ export class SchedulingService {
   private isPast(date: string, time: string): boolean {
     const candidate = new Date(`${date}T${time}:00`);
     return candidate.getTime() < Date.now();
-  }
-
-  private ensureNotWithinCutoff(date: string, time: string, action: string) {
-    const apptDateTime = new Date(`${date}T${time}:00`);
-    const diffMinutes = (apptDateTime.getTime() - Date.now()) / 60000;
-    if (diffMinutes < 0) {
-      throw new BadRequestException(`Cannot ${action} a past appointment`);
-    }
-    if (diffMinutes < RESCHEDULE_CANCEL_CUTOFF_MINUTES) {
-      throw new BadRequestException(
-        `Cannot ${action} within ${RESCHEDULE_CANCEL_CUTOFF_MINUTES} minutes of the appointment time`,
-      );
-    }
   }
 
   private timesOverlap(startA: string, endA: string, startB: string, endB: string): boolean {
@@ -239,7 +236,17 @@ export class SchedulingService {
         schedulingType: SchedulingType.STREAM,
         status: AppointmentStatus.BOOKED,
       });
-      return manager.save(appointment);
+      const saved = await manager.save(appointment);
+
+      await this.notificationService.notifyAppointmentBooked(manager, {
+        patientId: patient.id,
+        appointmentId: saved.id,
+        doctorName: doctor.name,
+        apptDate: saved.apptDate,
+        startTime: saved.startTime,
+      });
+
+      return saved;
     });
   }
 
@@ -288,11 +295,21 @@ export class SchedulingService {
         tokenNumber,
         status: AppointmentStatus.BOOKED,
       });
-      return manager.save(appointment);
+      const saved = await manager.save(appointment);
+
+      await this.notificationService.notifyAppointmentBooked(manager, {
+        patientId: patient.id,
+        appointmentId: saved.id,
+        doctorName: doctor.name,
+        apptDate: saved.apptDate,
+        startTime: saved.startTime,
+      });
+
+      return saved;
     });
   }
 
-  // ---------- reschedule ----------
+  // ---------- reschedule (patient-initiated) ----------
 
   async rescheduleAppointment(userId: number, appointmentId: number, dto: RescheduleAppointmentDto) {
     const appointment = await this.appointmentRepo.findOne({
@@ -311,7 +328,7 @@ export class SchedulingService {
       throw new BadRequestException('Cannot reschedule a cancelled appointment');
     }
 
-    this.ensureNotWithinCutoff(appointment.apptDate, appointment.startTime, 'reschedule');
+    ensureNotWithinCutoff(appointment.apptDate, appointment.startTime, 'reschedule');
 
     if (this.isPast(dto.date, dto.startTime)) {
       throw new BadRequestException('Cannot reschedule to a past date/time');
@@ -368,7 +385,16 @@ export class SchedulingService {
         appointment.apptDate = dto.date;
         appointment.startTime = dto.startTime;
         appointment.endTime = newEndTime;
-        return manager.save(appointment);
+        const saved = await manager.save(appointment);
+
+        await this.notificationService.notifyAppointmentRescheduled(manager, {
+          patientId: patient.id,
+          appointmentId: saved.id,
+          newApptDate: saved.apptDate,
+          newStartTime: saved.startTime,
+        });
+
+        return saved;
       } else {
         if (!dto.endTime) throw new BadRequestException('endTime is required to identify the wave window');
 
@@ -400,12 +426,196 @@ export class SchedulingService {
         appointment.startTime = dto.startTime;
         appointment.endTime = dto.endTime;
         appointment.tokenNumber = existingInWindow.length + 1;
-        return manager.save(appointment);
+        const saved = await manager.save(appointment);
+
+        await this.notificationService.notifyAppointmentRescheduled(manager, {
+          patientId: patient.id,
+          appointmentId: saved.id,
+          newApptDate: saved.apptDate,
+          newStartTime: saved.startTime,
+        });
+
+        return saved;
       }
     });
   }
 
-  // ---------- availability-change reconciliation ----------
+  // ---------- availability-change reconciliation (auto-reschedule-first) ----------
+
+  /**
+   * Finds candidate open slots/windows for a doctor, starting from `fromDate`,
+   * excluding the appointment's own (now-invalid) original slot. This scan
+   * reads through the normal repo (same as getAvailableSlots always has),
+   * NOT the reconciliation transaction's manager — so it can be blind to
+   * writes made earlier in the same reconciliation pass. That's fine: the
+   * actual claim step below (tryClaimCandidate) re-checks under the
+   * transaction's own pessimistic_write lock before committing to a
+   * candidate, so a stale scan just costs a wasted candidate, never a
+   * double-booking.
+   */
+  private async getCandidateSlots(
+    doctor: Doctor,
+    fromDate: string,
+    exclude: { date: string; startTime: string },
+    lookaheadDays = AUTO_RESCHEDULE_LOOKAHEAD_DAYS,
+  ): Promise<CandidateSlot[]> {
+    const candidates: CandidateSlot[] = [];
+    let date = fromDate;
+
+    for (let i = 0; i <= lookaheadDays && candidates.length < AUTO_RESCHEDULE_MAX_CANDIDATES; i++) {
+      try {
+        const result: any = await this.getAvailableSlots(doctor.id, date);
+        if (doctor.schedulingType === SchedulingType.STREAM) {
+          for (const s of result.slots) {
+            if (!s.isAvailable) continue;
+            if (date === exclude.date && s.startTime === exclude.startTime) continue;
+            candidates.push({ date, startTime: s.startTime, endTime: s.endTime });
+          }
+        } else {
+          for (const w of result.windows) {
+            if (w.isFull) continue;
+            if (date === exclude.date && w.windowStartTime === exclude.startTime) continue;
+            candidates.push({ date, startTime: w.windowStartTime, endTime: w.windowEndTime });
+          }
+        }
+      } catch {
+        // doctor has no availability at all on this date — keep scanning forward
+      }
+      date = this.addDays(date, 1);
+    }
+    return candidates;
+  }
+
+  /** Stamps audit fields (first shrink only — repeat reschedules don't overwrite the original) and the new slot values onto the appointment. Caller saves. */
+  private applyAutoRescheduleFields(appt: Appointment, candidate: CandidateSlot, tokenNumber: number | null) {
+    appt.originalApptDate = appt.originalApptDate ?? appt.apptDate;
+    appt.originalStartTime = appt.originalStartTime ?? appt.startTime;
+    appt.originalEndTime = appt.originalEndTime ?? appt.endTime;
+    appt.originalTokenNumber = appt.originalTokenNumber ?? appt.tokenNumber ?? null;
+
+    appt.apptDate = candidate.date;
+    appt.startTime = candidate.startTime;
+    appt.endTime = candidate.endTime;
+    appt.autoRescheduled = true;
+    appt.notificationPending = true; // legacy hook flag — the actual notification is created explicitly below now
+    if (tokenNumber !== null) appt.tokenNumber = tokenNumber;
+  }
+
+  /**
+   * Tries to claim one specific candidate slot for this appointment, under
+   * a savepoint scoped to the outer reconciliation transaction. Re-runs the
+   * same conflict/duplicate/capacity checks bookStream/bookWave use, on the
+   * SAME manager (so it sees every write made earlier in this reconciliation
+   * pass). Returns false — and rolls back to the savepoint — on any conflict
+   * or unexpected error, leaving the appointment untouched for the next
+   * candidate attempt.
+   */
+  private async tryClaimCandidate(
+    manager: EntityManager,
+    doctor: Doctor,
+    appt: Appointment,
+    candidate: CandidateSlot,
+  ): Promise<boolean> {
+    await manager.query('SAVEPOINT auto_reschedule_attempt');
+    try {
+      if (doctor.schedulingType === SchedulingType.STREAM) {
+        const conflict = await manager
+          .createQueryBuilder(Appointment, 'a')
+          .setLock('pessimistic_write')
+          .where('a.doctorId = :doctorId', { doctorId: doctor.id })
+          .andWhere('a.apptDate = :date', { date: candidate.date })
+          .andWhere('a.startTime = :startTime', { startTime: candidate.startTime })
+          .andWhere('a.status = :status', { status: AppointmentStatus.BOOKED })
+          .andWhere('a.id != :id', { id: appt.id })
+          .getOne();
+        if (conflict) {
+          await manager.query('ROLLBACK TO SAVEPOINT auto_reschedule_attempt');
+          return false;
+        }
+
+        const duplicate = await manager
+          .createQueryBuilder(Appointment, 'a')
+          .where('a.patientId = :patientId', { patientId: appt.patient.id })
+          .andWhere('a.apptDate = :date', { date: candidate.date })
+          .andWhere('a.startTime = :startTime', { startTime: candidate.startTime })
+          .andWhere('a.id != :id', { id: appt.id })
+          .andWhere('a.status = :status', { status: AppointmentStatus.BOOKED })
+          .getOne();
+        if (duplicate) {
+          await manager.query('ROLLBACK TO SAVEPOINT auto_reschedule_attempt');
+          return false;
+        }
+
+        this.applyAutoRescheduleFields(appt, candidate, null);
+        await manager.save(appt);
+      } else {
+        const existingInWindow = await manager
+          .createQueryBuilder(Appointment, 'a')
+          .setLock('pessimistic_write')
+          .where('a.doctorId = :doctorId', { doctorId: doctor.id })
+          .andWhere('a.apptDate = :date', { date: candidate.date })
+          .andWhere('a.startTime = :startTime', { startTime: candidate.startTime })
+          .andWhere('a.endTime = :endTime', { endTime: candidate.endTime })
+          .andWhere('a.status = :status', { status: AppointmentStatus.BOOKED })
+          .andWhere('a.id != :id', { id: appt.id })
+          .leftJoinAndSelect('a.patient', 'patient')
+          .getMany();
+
+        const duplicate = existingInWindow.find((a) => a.patient?.id === appt.patient.id);
+        if (duplicate) {
+          await manager.query('ROLLBACK TO SAVEPOINT auto_reschedule_attempt');
+          return false;
+        }
+
+        const effectiveCapacity = this.computeEffectiveCapacity(doctor, candidate.startTime, candidate.endTime);
+        if (existingInWindow.length >= effectiveCapacity) {
+          await manager.query('ROLLBACK TO SAVEPOINT auto_reschedule_attempt');
+          return false;
+        }
+
+        const tokenNumber = existingInWindow.length + 1;
+        this.applyAutoRescheduleFields(appt, candidate, tokenNumber);
+        await manager.save(appt);
+      }
+
+      // Notify inside the same savepoint scope — if this fails, the whole
+      // candidate attempt (including the slot claim above) rolls back
+      // together, and attemptAutoReschedule simply moves to the next
+      // candidate rather than leaving a rescheduled appointment with no
+      // notification.
+      await this.notificationService.notifyAppointmentRescheduled(manager, {
+        patientId: appt.patient.id,
+        appointmentId: appt.id,
+        newApptDate: appt.apptDate,
+        newStartTime: appt.startTime,
+      });
+
+      await manager.query('RELEASE SAVEPOINT auto_reschedule_attempt');
+      return true;
+    } catch {
+      await manager.query('ROLLBACK TO SAVEPOINT auto_reschedule_attempt');
+      return false;
+    }
+  }
+
+  /**
+   * Top-level entry point for a displaced appointment: scan for candidates,
+   * try to claim them in order, return true on first success. Caller
+   * (reconcileAppointmentsForDate) falls back to cancelling with
+   * NO_ALTERNATIVE_SLOT_FOUND if this returns false.
+   */
+  private async attemptAutoReschedule(manager: EntityManager, doctor: Doctor, appt: Appointment): Promise<boolean> {
+    const candidates = await this.getCandidateSlots(doctor, appt.apptDate, {
+      date: appt.apptDate,
+      startTime: appt.startTime,
+    });
+
+    for (const candidate of candidates) {
+      const claimed = await this.tryClaimCandidate(manager, doctor, appt, candidate);
+      if (claimed) return true;
+    }
+    return false;
+  }
 
   async reconcileAppointmentsForDate(doctorId: number, date: string) {
     const doctor = await this.doctorRepo.findOne({ where: { id: doctorId } });
@@ -419,66 +629,87 @@ export class SchedulingService {
       windows = []; // doctor has no availability at all on this date now
     }
 
-    const bookedAppointments = await this.appointmentRepo
-      .createQueryBuilder('a')
-      .where('a.doctorId = :doctorId', { doctorId })
-      .andWhere('a.apptDate = :date', { date })
-      .andWhere('a.status = :status', { status: AppointmentStatus.BOOKED })
-      .getMany();
+    return this.appointmentRepo.manager.transaction(async (manager) => {
+      const bookedAppointments = await manager
+        .createQueryBuilder(Appointment, 'a')
+        .where('a.doctorId = :doctorId', { doctorId })
+        .andWhere('a.apptDate = :date', { date })
+        .andWhere('a.status = :status', { status: AppointmentStatus.BOOKED })
+        .leftJoinAndSelect('a.patient', 'patient')
+        .getMany();
 
-    const cancelledIds: number[] = [];
+      const rescheduledIds: number[] = [];
+      const cancelledIds: number[] = [];
 
-    const cancelAppt = async (appt: Appointment) => {
-      appt.status = AppointmentStatus.CANCELLED;
-      appt.cancelReason = CancelReason.DOCTOR_AVAILABILITY_CHANGED;
-      appt.notificationPending = true; // future notification worker picks these up
-      await this.appointmentRepo.save(appt);
-      cancelledIds.push(appt.id);
-    };
+      const cancelAppt = async (appt: Appointment, reason: CancelReason) => {
+        appt.status = AppointmentStatus.CANCELLED;
+        appt.cancelReason = reason;
+        appt.notificationPending = true;
+        await manager.save(appt);
 
-    if (doctor.schedulingType === SchedulingType.STREAM) {
-      for (const appt of bookedAppointments) {
-        const fits = windows.some((w) => appt.startTime >= w.startTime && appt.endTime <= w.endTime);
-        if (!fits) await cancelAppt(appt);
-      }
-    } else {
-      const groups = new Map<string, Appointment[]>();
-      for (const appt of bookedAppointments) {
-        const key = `${appt.startTime}-${appt.endTime}`;
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key)!.push(appt);
-      }
+        await this.notificationService.notifyAppointmentCancelled(manager, {
+          patientId: appt.patient.id,
+          appointmentId: appt.id,
+          apptDate: appt.apptDate,
+          startTime: appt.startTime,
+        });
 
-      for (const [key, group] of groups) {
-        const [oldStart, oldEnd] = key.split('-');
+        cancelledIds.push(appt.id);
+      };
 
-        // Match by overlap, not exact equality — lets a resized window carry
-        // its bookings forward instead of being treated as a brand new window.
-        const matchedWindow = windows.find((w) => this.timesOverlap(w.startTime, w.endTime, oldStart, oldEnd));
+      const rescheduleOrCancel = async (appt: Appointment) => {
+        const rescheduled = await this.attemptAutoReschedule(manager, doctor, appt);
+        if (rescheduled) {
+          rescheduledIds.push(appt.id);
+        } else {
+          await cancelAppt(appt, CancelReason.NO_ALTERNATIVE_SLOT_FOUND);
+        }
+      };
 
-        if (!matchedWindow) {
-          for (const appt of group) await cancelAppt(appt);
-          continue;
+      if (doctor.schedulingType === SchedulingType.STREAM) {
+        for (const appt of bookedAppointments) {
+          const fits = windows.some((w) => appt.startTime >= w.startTime && appt.endTime <= w.endTime);
+          if (!fits) await rescheduleOrCancel(appt);
+        }
+      } else {
+        const groups = new Map<string, Appointment[]>();
+        for (const appt of bookedAppointments) {
+          const key = `${appt.startTime}-${appt.endTime}`;
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key)!.push(appt);
         }
 
-        const effectiveCapacity = this.computeEffectiveCapacity(doctor, matchedWindow.startTime, matchedWindow.endTime);
+        for (const [key, group] of groups) {
+          const [oldStart, oldEnd] = key.split('-');
 
-        const sorted = [...group].sort((a, b) => (b.tokenNumber ?? 0) - (a.tokenNumber ?? 0));
-        const excessCount = Math.max(0, group.length - effectiveCapacity);
-        const excess = sorted.slice(0, excessCount);
-        const kept = sorted.slice(excessCount);
+          // Match by overlap, not exact equality — lets a resized window carry
+          // its bookings forward instead of being treated as a brand new window.
+          const matchedWindow = windows.find((w) => this.timesOverlap(w.startTime, w.endTime, oldStart, oldEnd));
 
-        for (const appt of excess) await cancelAppt(appt);
+          if (!matchedWindow) {
+            for (const appt of group) await rescheduleOrCancel(appt);
+            continue;
+          }
 
-        for (const appt of kept) {
-          appt.startTime = matchedWindow.startTime;
-          appt.endTime = matchedWindow.endTime;
-          await this.appointmentRepo.save(appt);
+          const effectiveCapacity = this.computeEffectiveCapacity(doctor, matchedWindow.startTime, matchedWindow.endTime);
+
+          const sorted = [...group].sort((a, b) => (b.tokenNumber ?? 0) - (a.tokenNumber ?? 0));
+          const excessCount = Math.max(0, group.length - effectiveCapacity);
+          const excess = sorted.slice(0, excessCount);
+          const kept = sorted.slice(excessCount);
+
+          for (const appt of excess) await rescheduleOrCancel(appt);
+
+          for (const appt of kept) {
+            appt.startTime = matchedWindow.startTime;
+            appt.endTime = matchedWindow.endTime;
+            await manager.save(appt);
+          }
         }
       }
-    }
 
-    return { cancelledAppointmentIds: cancelledIds };
+      return { rescheduledAppointmentIds: rescheduledIds, cancelledAppointmentIds: cancelledIds };
+    });
   }
 
   async reconcileAllFutureDatesForDoctor(doctorId: number) {
@@ -492,11 +723,17 @@ export class SchedulingService {
       .andWhere('a.apptDate >= :today', { today })
       .getRawMany();
 
+    const allRescheduledIds: number[] = [];
     const allCancelledIds: number[] = [];
     for (const row of futureDates) {
       const result = await this.reconcileAppointmentsForDate(doctorId, row.apptDate);
+      allRescheduledIds.push(...result.rescheduledAppointmentIds);
       allCancelledIds.push(...result.cancelledAppointmentIds);
     }
-    return { cancelledAppointmentIds: allCancelledIds, datesChecked: futureDates.length };
+    return {
+      rescheduledAppointmentIds: allRescheduledIds,
+      cancelledAppointmentIds: allCancelledIds,
+      datesChecked: futureDates.length,
+    };
   }
 }

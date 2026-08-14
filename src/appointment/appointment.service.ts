@@ -5,6 +5,8 @@ import { Appointment } from './appointment.entity';
 import { AppointmentStatus } from './enums/appointment-status.enum';
 import { Patient } from '../patient/patient.entity';
 import { Doctor } from '../doctor/doctor.entity';
+import { NotificationService } from '../notification/notification.service';
+import { ensureNotWithinCutoff } from './appointment-time.util';
 
 @Injectable()
 export class AppointmentService {
@@ -12,6 +14,7 @@ export class AppointmentService {
     @InjectRepository(Appointment) private appointmentRepo: Repository<Appointment>,
     @InjectRepository(Patient) private patientRepo: Repository<Patient>,
     @InjectRepository(Doctor) private doctorRepo: Repository<Doctor>,
+    private notificationService: NotificationService,
   ) {}
 
   async getMyAppointments(userId: number) {
@@ -65,12 +68,23 @@ export class AppointmentService {
       throw new BadRequestException('Appointment is already cancelled');
     }
 
-    const apptDateTime = new Date(`${appointment.apptDate}T${appointment.startTime}:00`);
-    if (apptDateTime.getTime() < Date.now()) {
-      throw new BadRequestException('Cannot cancel a past appointment');
-    }
+    ensureNotWithinCutoff(appointment.apptDate, appointment.startTime, 'cancel');
 
-    appointment.status = AppointmentStatus.CANCELLED;
-    return this.appointmentRepo.save(appointment);
+    return this.appointmentRepo.manager.transaction(async (manager) => {
+      appointment.status = AppointmentStatus.CANCELLED;
+      const saved = await manager.save(appointment);
+
+      // Best-effort: a notification failure here rolls back only itself
+      // (see NotificationService — savepoint-protected) and never blocks
+      // the cancellation from committing.
+      await this.notificationService.notifyAppointmentCancelled(manager, {
+        patientId: patient.id,
+        appointmentId: saved.id,
+        apptDate: saved.apptDate,
+        startTime: saved.startTime,
+      });
+
+      return saved;
+    });
   }
 }

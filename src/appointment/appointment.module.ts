@@ -8,10 +8,12 @@ import { Appointment } from './appointment.entity';
 import { Doctor } from '../doctor/doctor.entity';
 import { Patient } from '../patient/patient.entity';
 import { DoctorModule } from '../doctor/doctor.module';
+import { NotificationModule } from 'src/notification/notification.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Appointment, Doctor, Patient]),
+    NotificationModule,
     forwardRef(() => DoctorModule),
   ],
   providers: [AppointmentService, SchedulingService],

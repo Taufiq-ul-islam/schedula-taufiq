@@ -36,6 +36,21 @@ export class Appointment {
   @Column({ type: 'timestamp', default: () => 'CURRENT_TIMESTAMP' })
   createdAt!: Date;
 
+  @Column({ type: 'date', nullable: true })
+  originalApptDate !: string | null;
+
+  @Column({ type: 'time', nullable: true })
+  originalStartTime !: string | null;
+
+  @Column({ type: 'time', nullable: true })
+  originalEndTime !: string | null;
+
+  @Column({ type: 'int', nullable: true })
+  originalTokenNumber !: number | null;
+
+  @Column({ type: 'boolean', default: false })
+  autoRescheduled !: boolean;
+
   @Column({ nullable: true })
   cancelReason!: string;
 
