@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { UserModule } from './user/user.module';
@@ -24,6 +25,7 @@ import { NotificationModule } from './notification/notification.module';
       migrations: [__dirname + '/migrations/*{.ts,.js}'],
       ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
     }),
+    ScheduleModule.forRoot(),
     UserModule,
     DoctorModule,
     PatientModule,

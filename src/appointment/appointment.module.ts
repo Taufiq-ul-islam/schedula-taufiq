@@ -9,6 +9,7 @@ import { Doctor } from '../doctor/doctor.entity';
 import { Patient } from '../patient/patient.entity';
 import { DoctorModule } from '../doctor/doctor.module';
 import { NotificationModule } from 'src/notification/notification.module';
+import { AppointmentReminderService } from './appointment-reminder.service';
 
 @Module({
   imports: [
@@ -16,7 +17,7 @@ import { NotificationModule } from 'src/notification/notification.module';
     NotificationModule,
     forwardRef(() => DoctorModule),
   ],
-  providers: [AppointmentService, SchedulingService],
+  providers: [AppointmentService, SchedulingService, AppointmentReminderService],
   controllers: [AppointmentController, SchedulingController],
   exports: [TypeOrmModule, AppointmentService],
 })

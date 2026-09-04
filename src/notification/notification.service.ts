@@ -4,6 +4,7 @@ import { EntityManager, Repository } from 'typeorm';
 import { Notification } from './notification.entity';
 import { NotificationType } from './enums/notification-type.enum';
 import { Patient } from '../patient/patient.entity';
+import { SchedulingType } from '../doctor/enums/scheduling-type.enum';
 
 @Injectable()
 export class NotificationService {
@@ -31,6 +32,11 @@ export class NotificationService {
     h = h % 12;
     if (h === 0) h = 12;
     return `${h}:${m} ${period}`;
+  }
+
+  private isToday(dateStr: string): boolean {
+    const today = new Date().toISOString().slice(0, 10);
+    return dateStr === today;
   }
 
   // ---------- core creation, duplicate-safe and transaction-safe ----------
@@ -142,6 +148,41 @@ export class NotificationService {
       params.appointmentId,
       NotificationType.APPOINTMENT_RESCHEDULED,
       'Appointment Rescheduled',
+      message,
+    );
+  }
+
+  async notifyAppointmentReminder(
+    manager: EntityManager,
+    params: {
+      patientId: number;
+      appointmentId: number;
+      doctorName: string;
+      apptDate: string;
+      startTime: string;
+      schedulingType: SchedulingType;
+      tokenNumber?: number | null;
+    },
+  ): Promise<Notification | null> {
+    const dayPhrase = this.isToday(params.apptDate) ? 'today' : `on ${this.formatDate(params.apptDate)}`;
+
+    // Content differs by scheduling type per spec: STREAM gets a fixed
+    // appointment time, WAVE gets a reporting time + token number instead.
+    const message =
+      params.schedulingType === SchedulingType.WAVE
+        ? `Reminder: You have an appointment with Dr. ${params.doctorName} ${dayPhrase}.\nReporting Time: ${this.formatTime(
+            params.startTime,
+          )}\nToken Number: ${params.tokenNumber}`
+        : `Reminder: You have an appointment with Dr. ${params.doctorName} ${dayPhrase} at ${this.formatTime(
+            params.startTime,
+          )}.`;
+
+    return this.createIfNotDuplicate(
+      manager,
+      params.patientId,
+      params.appointmentId,
+      NotificationType.APPOINTMENT_REMINDER,
+      'Appointment Reminder',
       message,
     );
   }
